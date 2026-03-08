@@ -1,13 +1,10 @@
 import { createServiceClient } from '@/lib/supabase/server';
-import { connectBrowser, createPage, handleInfiniteScroll } from './browser';
-import { extractVehicleCards, extractVehicleDetail, interceptApiResponses } from './parsers';
+import { fetchSitemapUrls, fetchVehiclePage } from './parsers';
 import { downloadAndStoreImages } from './image-downloader';
 import { generateTitle, generateDescription } from '@/lib/listing/generator';
 import type { ScrapedVehicleData, Vehicle } from '@/types/vehicle';
 
-const TARGET_URL =
-  process.env.TARGET_DEALER_URL ||
-  'https://www.woodbinegm.com/vehicles/used/?st=make,asc&view=grid&sc=used';
+const SITEMAP_URL = 'https://www.woodbinegm.com/used-vehicle-1-sitemap.xml';
 
 export async function runScrape(runId: string): Promise<{
   found: number;
@@ -16,59 +13,36 @@ export async function runScrape(runId: string): Promise<{
   removed: number;
 }> {
   const supabase = createServiceClient();
-  let browser;
 
   try {
-    browser = await connectBrowser();
-    const page = await createPage(browser);
+    // Step 1: Fetch vehicle URLs from sitemap (instant, no browser)
+    console.log('Fetching vehicle URLs from sitemap...');
+    const vehicleUrls = await fetchSitemapUrls(SITEMAP_URL);
+    console.log(`Found ${vehicleUrls.length} vehicle URLs in sitemap`);
 
-    // Set up API interception to try to catch the inventory API
-    const apiVehicles = await interceptApiResponses(page);
+    // Step 2: Fetch each VDP page and parse JSON-LD structured data
+    const scrapedVehicles: ScrapedVehicleData[] = [];
 
-    // Navigate to listing page
-    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
-    await page.waitForTimeout(3000);
-
-    let scrapedVehicles: ScrapedVehicleData[] = [];
-
-    // If we caught API data, use it (much more reliable)
-    if (apiVehicles.length > 0) {
-      console.log(`Captured ${apiVehicles.length} vehicles from API interception`);
-      scrapedVehicles = apiVehicles;
-    } else {
-      // Fall back to DOM scraping
-      console.log('No API data captured, falling back to DOM scraping');
-
-      // Handle infinite scroll to load all vehicles
-      await handleInfiniteScroll(page);
-
-      // Extract vehicle card links
-      const vehicleCards = await extractVehicleCards(page);
-      console.log(`Found ${vehicleCards.length} vehicle cards`);
-
-      // Visit each vehicle detail page
-      for (const card of vehicleCards) {
-        if (!card.url) continue;
-
-        const detail = await extractVehicleDetail(page, card.url);
-        if (detail && detail.vin) {
-          scrapedVehicles.push(detail);
+    for (const url of vehicleUrls) {
+      try {
+        const vehicle = await fetchVehiclePage(url);
+        if (vehicle && vehicle.vin) {
+          scrapedVehicles.push(vehicle);
         }
-
-        // Brief pause between requests to be respectful
-        await page.waitForTimeout(1000);
+      } catch (error) {
+        console.error(`Failed to scrape ${url}:`, error);
       }
-    }
 
-    await browser.close();
-    browser = undefined;
+      // Brief pause to be respectful to the server
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
 
     console.log(`Scraped ${scrapedVehicles.length} vehicles total`);
 
-    // Process and upsert vehicles
-    const stats = await processScrapedVehicles(supabase, scrapedVehicles, runId);
+    // Step 3: Process and upsert vehicles
+    const stats = await processScrapedVehicles(supabase, scrapedVehicles);
 
-    // Update scrape run
+    // Step 4: Update scrape run record
     await supabase
       .from('scrape_runs')
       .update({
@@ -83,8 +57,6 @@ export async function runScrape(runId: string): Promise<{
 
     return stats;
   } catch (error) {
-    if (browser) await browser.close();
-
     const errorMessage = error instanceof Error ? error.message : String(error);
 
     await supabase
@@ -102,8 +74,7 @@ export async function runScrape(runId: string): Promise<{
 
 async function processScrapedVehicles(
   supabase: ReturnType<typeof createServiceClient>,
-  vehicles: ScrapedVehicleData[],
-  runId: string
+  vehicles: ScrapedVehicleData[]
 ): Promise<{ found: number; new_count: number; updated: number; removed: number }> {
   const now = new Date().toISOString();
   let newCount = 0;
