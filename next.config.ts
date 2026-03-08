@@ -1,7 +1,19 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'gmtadvantage-com.cdn-convertus.com',
+      },
+      {
+        protocol: 'https',
+        hostname: '*.supabase.co',
+      },
+    ],
+  },
+  serverExternalPackages: ['playwright-core'],
 };
 
 export default nextConfig;
